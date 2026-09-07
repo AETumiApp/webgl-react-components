@@ -65,10 +65,9 @@ Internally, the component should own renderer setup, resize behavior, animation 
 
 ## Repository status
 
-Documentation-first. Planned examples will focus on small components with clear APIs and production behavior.
+Active. Runnable, production-oriented examples now live in [`examples/`](./examples/) — reviewed for performance (adaptive quality), accessibility, reduced-motion and non-WebGL fallbacks, and clean resource disposal. The set is refined and extended as new patterns land.
 
 See [examples/README.md](./examples/README.md).
-
 ## About AETumi
 
 AETumi helps designers, developers and agencies build interactive 3D and WebGL experiences with Three.js, Next.js, React, React Three Fiber and AI-assisted coding workflows.
