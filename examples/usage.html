@@ -58,23 +58,26 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js" crossorigin></script>
 
 <!--
-  The ShaderBackground component, inlined here as a Babel-compiled script so the
-  demo is self-contained. In a real project you'd `import ShaderBackground from
-  "./ShaderBackground.jsx"` instead — the source in ShaderBackground.jsx is
-  identical apart from the ESM import/export lines.
+  ShaderBackground inlined as a Babel-compiled script so the demo is fully
+  self-contained. In a real project you'd `import ShaderBackground from
+  "./ShaderBackground.jsx"` instead — the logic here is identical to that file
+  apart from the ESM import/export lines.
 -->
 <script type="text/babel" data-presets="react">
-const { useRef, useEffect } = React;
+const { useRef, useEffect, useState } = React;
 
-function ShaderBackground({ colors = ["#3a1c71", "#d76d77", "#ffaf7b"], speed = 1, style, className }) {
+function ShaderBackground({ colors = ["#3a1c71", "#d76d77", "#ffaf7b"], speed = 1, intensity = 1, style, className }) {
   const canvasRef = useRef(null);
-  const propsRef = useRef({ colors, speed });
-  propsRef.current = { colors, speed };
+  const propsRef = useRef({ colors, speed, intensity });
+  propsRef.current = { colors, speed, intensity };
+  const [supported, setSupported] = useState(true);
 
   useEffect(() => {
+    if (!supported) return;
     const canvas = canvasRef.current;
+    if (!canvas) return;
     const gl = canvas.getContext("webgl", { antialias: false, alpha: true });
-    if (!gl) return;
+    if (!gl) { setSupported(false); return; }
 
     const VERT = `
       attribute vec2 a_pos;
@@ -85,6 +88,7 @@ function ShaderBackground({ colors = ["#3a1c71", "#d76d77", "#ffaf7b"], speed = 
       uniform float u_time;
       uniform vec2  u_resolution;
       uniform vec3  u_c0; uniform vec3 u_c1; uniform vec3 u_c2;
+      uniform float u_intensity;
       float hash(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
       float noise(vec2 p){
         vec2 i = floor(p); vec2 f = fract(p);
@@ -102,19 +106,24 @@ function ShaderBackground({ colors = ["#3a1c71", "#d76d77", "#ffaf7b"], speed = 
         float band = uv.y + 0.25 * sin(uv.x * 3.14159 + t) + 0.35 * n;
         vec3 col = mix(u_c0, u_c1, smoothstep(0.15, 0.6, band));
         col = mix(col, u_c2, smoothstep(0.55, 1.05, band));
+        col *= u_intensity;
         gl_FragColor = vec4(col, 1.0);
       }
     `;
     function compile(type, src){
       const sh = gl.createShader(type);
       gl.shaderSource(sh, src); gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(sh));
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(sh)); gl.deleteShader(sh); return null; }
       return sh;
     }
+    const vs = compile(gl.VERTEX_SHADER, VERT);
+    const fs = compile(gl.FRAGMENT_SHADER, FRAG);
+    if (!vs || !fs) { setSupported(false); return; }
     const program = gl.createProgram();
-    gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT));
-    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
-    gl.linkProgram(program); gl.useProgram(program);
+    gl.attachShader(program, vs); gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(program)); setSupported(false); return; }
+    gl.useProgram(program);
 
     const buffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -128,61 +137,101 @@ function ShaderBackground({ colors = ["#3a1c71", "#d76d77", "#ffaf7b"], speed = 
     const uC0 = gl.getUniformLocation(program, "u_c0");
     const uC1 = gl.getUniformLocation(program, "u_c1");
     const uC2 = gl.getUniformLocation(program, "u_c2");
+    const uIntensity = gl.getUniformLocation(program, "u_intensity");
 
     const hexToRgb = (hex) => {
-      const h = hex.replace("#", "");
+      const h = String(hex).replace("#", "");
       const v = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
       const n = parseInt(v, 16);
       return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
     };
 
+    let quality = 1.0;
+    const DPR_CAP = 2;
+    const dpr = () => Math.min(window.devicePixelRatio || 1, DPR_CAP) * quality;
     function resize(){
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const w = Math.floor(window.innerWidth * dpr);
-      const h = Math.floor(window.innerHeight * dpr);
-      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-      gl.viewport(0, 0, canvas.width, canvas.height);
+      const d = dpr();
+      const w = Math.max(1, Math.floor(window.innerWidth * d));
+      const h = Math.max(1, Math.floor(window.innerHeight * d));
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
     }
     window.addEventListener("resize", resize); resize();
 
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
     const start = performance.now();
-    let raf = 0;
+    let raf = 0, running = false, onScreen = true, pageVisible = !document.hidden;
+    let frames = 0, fpsClock = 0, lastAdapt = 0;
+    function sampleFps(now){
+      if (!fpsClock) { fpsClock = now; return; }
+      frames++;
+      const span = now - fpsClock;
+      if (span >= 500) {
+        const fps = (frames * 1000) / span; frames = 0; fpsClock = now;
+        if (now - lastAdapt > 900) {
+          if (fps < 50 && quality > 0.5) { quality = Math.max(0.5, quality - 0.15); resize(); lastAdapt = now; }
+          else if (fps > 58 && quality < 1.0) { quality = Math.min(1.0, quality + 0.1); resize(); lastAdapt = now; }
+        }
+      }
+    }
     function frame(now){
-      const { colors, speed } = propsRef.current;
+      raf = requestAnimationFrame(frame);
+      sampleFps(now);
+      const { colors, speed, intensity } = propsRef.current;
       const t = reduce.matches ? 0 : ((now - start) / 1000) * speed;
-      const c = colors.map(hexToRgb);
+      const c = (colors || []).map(hexToRgb);
       gl.uniform1f(uTime, t);
       gl.uniform2f(uRes, canvas.width, canvas.height);
       gl.uniform3fv(uC0, c[0] || [0.2,0.1,0.4]);
       gl.uniform3fv(uC1, c[1] || [0.8,0.4,0.5]);
       gl.uniform3fv(uC2, c[2] || [1.0,0.7,0.5]);
+      gl.uniform1f(uIntensity, intensity == null ? 1 : intensity);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
-      raf = requestAnimationFrame(frame);
     }
-    raf = requestAnimationFrame(frame);
+    function sync(){
+      const want = onScreen && pageVisible;
+      if (want && !running) { running = true; fpsClock = 0; frames = 0; raf = requestAnimationFrame(frame); }
+      else if (!want && running) { running = false; cancelAnimationFrame(raf); }
+    }
+    const io = ("IntersectionObserver" in window)
+      ? new IntersectionObserver((es) => { onScreen = es[0].isIntersecting; sync(); }, { threshold: 0.01 })
+      : null;
+    if (io) io.observe(canvas);
+    const onVis = () => { pageVisible = !document.hidden; sync(); };
+    document.addEventListener("visibilitychange", onVis);
+    const onLost = (e) => { e.preventDefault(); running = false; cancelAnimationFrame(raf); setSupported(false); };
+    canvas.addEventListener("webglcontextlost", onLost, false);
+    sync();
 
     return () => {
+      running = false;
       cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
+      document.removeEventListener("visibilitychange", onVis);
+      canvas.removeEventListener("webglcontextlost", onLost);
+      if (io) io.disconnect();
       gl.deleteBuffer(buffer); gl.deleteProgram(program);
+      gl.deleteShader(vs); gl.deleteShader(fs);
       const lose = gl.getExtension("WEBGL_lose_context");
       if (lose) lose.loseContext();
     };
-  }, []);
+  }, [supported]);
 
-  return React.createElement("canvas", {
-    ref: canvasRef,
-    className,
-    "aria-hidden": "true",
-    style: { position: "fixed", inset: 0, width: "100%", height: "100%", zIndex: -1, pointerEvents: "none", display: "block", ...style },
-  });
+  const baseStyle = { position: "fixed", inset: 0, width: "100%", height: "100%", zIndex: -1, pointerEvents: "none", display: "block", ...style };
+
+  if (!supported) {
+    const [c0, c1, c2] = colors;
+    return React.createElement("div", {
+      className, "aria-hidden": "true",
+      style: { ...baseStyle, background: `linear-gradient(160deg, ${c0} 0%, ${c1} 55%, ${c2} 100%)` },
+    });
+  }
+  return React.createElement("canvas", { ref: canvasRef, className, "aria-hidden": "true", style: baseStyle });
 }
 
 function App() {
   return (
     <>
-      <ShaderBackground colors={["#141e30", "#7b4397", "#f8b195"]} speed={1} />
+      <ShaderBackground colors={["#141e30", "#7b4397", "#f8b195"]} speed={1} intensity={1.05} />
       <main className="hero">
         <h1>Ship 3D that loads instantly.</h1>
         <p>A GPU-rendered aurora sits behind your hero — one component, no images, no jank.</p>
